@@ -1,0 +1,17 @@
+node_modules
+dist
+dist-ssr
+*.local
+.env
+.env.*
+!.env.example
+.vercel
+.DS_Store
+*.log
+
+# Local agent tooling, not part of the game
+.agents
+.claude
+.grok
+.zencoder
+skills-lock.json
