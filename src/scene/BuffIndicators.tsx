@@ -2,14 +2,14 @@ import { useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import * as THREE from 'three';
 import { ALL_CARDS } from '../data/cards';
-import { axialToWorld, getTile } from '../logic/grid';
+import { axialToWorld, getTile, tilePrismHeight } from '../logic/grid';
 import { BuffCardId, PlayedCardAction, TileState } from '../logic/types';
 import { useGameStore } from '../store/useGameStore';
 
-function tileTopY(grid: TileState[], q: number, r: number): number {
+function tileTopY(grid: TileState[], q: number, r: number, seed: number): number {
   const tile = getTile(grid, q, r);
   const depth = tile?.coastalDepth ?? 2;
-  const tileHeight = depth === 0 ? 0.16 : depth === 1 ? 0.2 : 0.24;
+  const tileHeight = tilePrismHeight(depth, q, r, seed);
   const tileY = (tileHeight - 0.16) / 2;
   return tileY + tileHeight / 2;
 }
@@ -140,6 +140,7 @@ function BobbingMark({
 export function BuffIndicators() {
   const actions = useGameStore((s) => s.defenderPlayedActions);
   const grid = useGameStore((s) => s.grid);
+  const boardSeed = useGameStore((s) => s.boardSeed);
   if (actions.length === 0) return null;
 
   const globals: PlayedCardAction[] = [];
@@ -150,7 +151,7 @@ export function BuffIndicators() {
   }
 
   const [hallX, hallZ] = axialToWorld(0, 0);
-  const hallFloat = tileTopY(grid, 0, 0) + 1.05;
+  const hallFloat = tileTopY(grid, 0, 0, boardSeed) + 1.05;
 
   return (
     <group>
@@ -171,7 +172,7 @@ export function BuffIndicators() {
         const q = action.targetQ ?? 0;
         const r = action.targetR ?? 0;
         const [x, z] = axialToWorld(q, r);
-        const top = tileTopY(grid, q, r);
+        const top = tileTopY(grid, q, r, boardSeed);
         const id = action.cardId as BuffCardId;
         const tint = ALL_CARDS[id].badgeTint ?? '#e879f9';
         return (

@@ -85,7 +85,7 @@ export interface BuildingInstance {
 export interface TileState {
   q: number; // Axial coordinate q (-3..3)
   r: number; // Axial coordinate r (-3..3)
-  coastalDepth: number; // 0 = South-East sea edge, 1 = 1 hex inland, etc.
+  coastalDepth: number; // 0 = this game's sea edge, 1 = one hex inland. Seeded per match.
   elevation: 'LOW' | 'NORMAL';
   building: BuildingInstance | null;
   onFire: boolean;

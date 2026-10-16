@@ -7,6 +7,7 @@ import {
   createBuildingInstance,
   createInitialGrid,
   getTile,
+  rollBoardSeed,
   HEX_DIRECTION_LIST,
   isValidHex
 } from '../logic/grid';
@@ -75,6 +76,10 @@ interface GameStoreState {
 
   // Hex Grid (37 tiles, radius 3) & resources
   grid: TileState[];
+  /** Coastline seed for this match. Half 2 reuses it. */
+  boardSeed: number;
+  /** Bumps when a board is generated so the hexes play their rise again. */
+  boardReveal: number;
   budget: number;
   food: number;
   energyDefender: number;
@@ -135,6 +140,8 @@ const DEFAULT_DECK: PlayerDeck = {
   disasters: DISASTER_CARD_LIST.map((c) => c.id as DisasterCardId),
   buffs: BUFF_CARD_LIST.map((c) => c.id as BuffCardId)
 };
+
+const openingBoardSeed = rollBoardSeed();
 
 const INITIAL_VFX: VisualEffectState = {
   fireBurstTiles: [],
@@ -211,7 +218,9 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
   defenderPlayer: 'A',
   kalikasanPlayer: 'B',
 
-  grid: createInitialGrid(),
+  grid: createInitialGrid(openingBoardSeed),
+  boardSeed: openingBoardSeed,
+  boardReveal: 1,
   budget: STARTING_BUDGET,
   food: 4,
   energyDefender: 4,
@@ -330,6 +339,7 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
     const defDeck = state.decks[defenderPlayer];
     const kalDeck = state.decks[kalikasanPlayer];
     const initialEnergy = Math.min(7, 3 + 1); // Round 1 => 4 energy
+    const boardSeed = halfNumber === 1 ? rollBoardSeed() : state.boardSeed;
 
     set({
       screen: 'MATCH',
@@ -338,7 +348,9 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
       phase: 'FORECAST',
       defenderPlayer,
       kalikasanPlayer,
-      grid: createInitialGrid(),
+      boardSeed,
+      boardReveal: state.boardReveal + 1,
+      grid: createInitialGrid(boardSeed),
       budget: STARTING_BUDGET,
       food: 4,
       energyDefender: initialEnergy,
@@ -354,7 +366,10 @@ export const useGameStore = create<GameStoreState>((set, get) => ({
       forecastDisasterId: pickForecastDisaster(kalDeck, 2),
       windDirection: pickWindDirection(halfNumber, 1),
       roundLogs: [
-        `Half ${halfNumber} Begins! Player ${defenderPlayer} is Barangay Captain (Defender); Player ${kalikasanPlayer} is Kalikasan.`
+        `Half ${halfNumber} Begins! Player ${defenderPlayer} is Barangay Captain (Defender); Player ${kalikasanPlayer} is Kalikasan.`,
+        ...(halfNumber === 1
+          ? ['The south-east beach was cut new for this game, and the nipa huts found a new terrace.']
+          : [])
       ],
       vfx: { ...INITIAL_VFX }
     });

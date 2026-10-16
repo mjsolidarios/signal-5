@@ -2,7 +2,6 @@ import { BUILDINGS } from '../data/buildings';
 import {
   cloneGrid,
   formatHexCoord,
-  getCoastalDepth,
   getHexCluster,
   getHexNeighbors,
   getTile,
@@ -572,7 +571,7 @@ export function resolveRound(input: ResolveRoundInput): ResolveRoundOutput {
         }
         // Flood 1 low South-East coastal edge tile
         let edgeTile = getTile(grid, tq, tr);
-        if (!edgeTile || getCoastalDepth(edgeTile.q, edgeTile.r) !== 0) {
+        if (!edgeTile || edgeTile.coastalDepth !== 0) {
           // Snap to nearest coastal edge hex
           const coastalHexes = grid.filter((t) => t.coastalDepth === 0);
           coastalHexes.sort(

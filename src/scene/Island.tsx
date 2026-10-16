@@ -1,67 +1,122 @@
-import React, { useEffect, useMemo, useRef } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
 import { BUILDINGS } from '../data/buildings';
 import { ALL_CARDS } from '../data/cards';
-import { axialToWorld, getTile, hexDistance, isValidHex, worldToAxial } from '../logic/grid';
+import {
+  axialToWorld,
+  boardCoastFromSeed,
+  boatAnchor,
+  getTile,
+  hexDistance,
+  isValidHex,
+  mixHash,
+  SeaHexSpec,
+  tilePrismHeight,
+  worldToAxial
+} from '../logic/grid';
 import { isGridPowered } from '../logic/rules';
 import { useGameStore } from '../store/useGameStore';
 import { BuildingRenderer, GhostBuildingPreview } from './Buildings';
 
-interface SeaHexTile {
-  q: number;
-  r: number;
-  ring: 4 | 5; // 4 = shallow coastal surf lagoon, 5 = deep sea
-  x: number;
-  z: number;
-  phase: number;
+/** Ease-out back. The overshoot is about a tenth of the rise, then it settles. */
+function easeOutBack(t: number): number {
+  const c1 = 2.5;
+  const c3 = c1 + 1;
+  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
 }
 
-/**
- * Generates the contiguous pointy-top hexagonal water tiles along the two South-East edges
- * (Ring 4 coastal surf and Ring 5 deep water), interlocking seamlessly with the 37 land hexes.
- */
-function generateSouthEastSeaHexes(): SeaHexTile[] {
-  const seaHexes: SeaHexTile[] = [];
+const REVEAL_STAGGER = 0.014;
+const REVEAL_DURATION = 0.18;
+const REVEAL_DROP = 0.72;
 
-  for (const ring of [4, 5] as const) {
-    // Edge A: q + r = ring (for q from 0 to ring)
-    for (let q = 0; q <= ring; q++) {
-      const r = ring - q;
-      const [x, z] = axialToWorld(q, r);
-      seaHexes.push({
-        q,
-        r,
-        ring,
-        x,
-        z,
-        phase: q * 0.75 + r * 1.15
-      });
-    }
-    // Edge B: r = ring (for q from -ring to -1)
-    for (let q = -ring; q <= -1; q++) {
-      const r = ring;
-      const [x, z] = axialToWorld(q, r);
-      seaHexes.push({
-        q,
-        r,
-        ring,
-        x,
-        z,
-        phase: q * 0.75 + r * 1.15
-      });
-    }
-  }
+function useHexReveal(revealKey: number, index: number, hold: boolean) {
+  const ref = useRef<THREE.Group>(null);
+  const ready = useRef(false);
+  const start = useRef(0);
+  const reduce = useRef(false);
+  const holdRef = useRef(hold);
+  holdRef.current = hold;
 
-  return seaHexes;
+  useLayoutEffect(() => {
+    reduce.current =
+      typeof window !== 'undefined' &&
+      window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    ready.current = false;
+    const group = ref.current;
+    if (!group) return;
+    if (reduce.current) {
+      group.visible = true;
+      group.position.y = 0;
+      group.scale.setScalar(1);
+      return;
+    }
+    group.visible = false;
+    group.position.y = -REVEAL_DROP;
+    group.scale.setScalar(0.94);
+  }, [revealKey]);
+
+  useFrame(({ clock }) => {
+    const group = ref.current;
+    if (!group) return;
+    if (reduce.current) {
+      group.visible = true;
+      group.position.y = 0;
+      group.scale.setScalar(1);
+      return;
+    }
+    // The forecast bulletin covers the board. Stay hidden until it closes,
+    // then rise, so the stagger plays on the open island.
+    if (holdRef.current) {
+      ready.current = false;
+      group.visible = false;
+      group.position.y = -REVEAL_DROP;
+      group.scale.setScalar(0.94);
+      return;
+    }
+    if (!ready.current) {
+      start.current = clock.elapsedTime;
+      ready.current = true;
+    }
+    const elapsed = clock.elapsedTime - start.current - index * REVEAL_STAGGER;
+    if (elapsed <= 0) {
+      group.visible = false;
+      group.position.y = -REVEAL_DROP;
+      group.scale.setScalar(0.94);
+      return;
+    }
+    group.visible = true;
+    const progress = Math.min(elapsed / REVEAL_DURATION, 1);
+    const eased = easeOutBack(progress);
+    group.position.y = (eased - 1) * REVEAL_DROP;
+    const settle = Math.min(1, progress * 1.35);
+    group.scale.setScalar(0.94 + 0.06 * settle);
+  });
+
+  return ref;
 }
+
+const RevealedHex: React.FC<{
+  revealKey: number;
+  index: number;
+  hold: boolean;
+  position: [number, number, number];
+  children: React.ReactNode;
+}> = ({ revealKey, index, hold, position, children }) => {
+  const ref = useHexReveal(revealKey, index, hold);
+  return (
+    <group position={position}>
+      <group ref={ref}>{children}</group>
+    </group>
+  );
+};
 
 /**
  * Animated Hexagonal Ocean Tile (interlocks with the pointy-top hex grid with zero z-fighting).
  * Ring 4 features a bright teal top + crisp white inner hex ring; Ring 5 features royal blue + deep navy sides.
  */
 const OceanHexPrism: React.FC<{
-  seaHex: SeaHexTile;
+  seaHex: SeaHexSpec;
   signal5Active: boolean;
   windSeverity: number;
 }> = ({ seaHex, signal5Active, windSeverity }) => {
@@ -100,7 +155,7 @@ const OceanHexPrism: React.FC<{
     : '#1e3a8a'; // Deep navy cliff side on Ring 5
 
   return (
-    <group position={[seaHex.x, -0.06, seaHex.z]}>
+    <group position={[0, -0.06, 0]}>
       {/* Solid seabed column underneath each water hex so there are no transparent overlap seams */}
       <mesh position={[0, -0.34, 0]}>
         <cylinderGeometry args={[0.638, 0.61, 0.56, 6]} />
@@ -225,13 +280,14 @@ const FloodedHexOverlay: React.FC<{ tileHeight: number; seed: number }> = ({
 /**
  * Natural 3D terrain details (low-poly volcanic rocks, pebbles, and grass blades) on empty hexes.
  */
-const EmptyHexDecor: React.FC<{ q: number; r: number; coastalDepth: number; tileHeight: number }> = ({
-  q,
-  r,
-  coastalDepth,
-  tileHeight
-}) => {
-  const hash = Math.abs((q * 37 + r * 17) % 7);
+const EmptyHexDecor: React.FC<{
+  q: number;
+  r: number;
+  coastalDepth: number;
+  tileHeight: number;
+  seed: number;
+}> = ({ q, r, coastalDepth, tileHeight, seed }) => {
+  const hash = mixHash(q, r, seed) % 7;
   const topY = tileHeight / 2 + 0.012;
 
   if (coastalDepth === 0) {
@@ -336,9 +392,17 @@ const PalmTree: React.FC<{
 /**
  * Low-poly Philippine Bangka (outrigger fishing boat) bobbing on the South-East hex sea.
  */
-const BangkaBoat: React.FC<{ windLevel: number }> = ({ windLevel }) => {
+const BangkaBoat: React.FC<{
+  windLevel: number;
+  anchor: { x: number; z: number; yaw: number };
+}> = ({ windLevel, anchor }) => {
   const boatRef = useRef<THREE.Group>(null);
-  const [bx, bz] = useMemo(() => axialToWorld(1.5, 3.2), []);
+
+  useLayoutEffect(() => {
+    boatRef.current?.traverse((obj) => {
+      obj.raycast = () => {};
+    });
+  }, []);
 
   useFrame(({ clock }) => {
     if (boatRef.current) {
@@ -351,7 +415,7 @@ const BangkaBoat: React.FC<{ windLevel: number }> = ({ windLevel }) => {
   });
 
   return (
-    <group ref={boatRef} position={[bx, 0.02, bz]} rotation={[0, -Math.PI / 3, 0]}>
+    <group ref={boatRef} position={[anchor.x, 0.02, anchor.z]} rotation={[0, anchor.yaw, 0]}>
       <mesh position={[0, 0.04, 0]}>
         <boxGeometry args={[0.82, 0.1, 0.2]} />
         <meshStandardMaterial color="#f8fafc" flatShading />
@@ -533,6 +597,9 @@ const ArchipelagoBackdrop: React.FC<{ signal5Active: boolean; windSeverity: numb
 
 export const IslandBoard: React.FC = () => {
   const grid = useGameStore((s) => s.grid);
+  const boardSeed = useGameStore((s) => s.boardSeed);
+  const boardReveal = useGameStore((s) => s.boardReveal);
+  const screen = useGameStore((s) => s.screen);
   const hoveredTile = useGameStore((s) => s.hoveredTile);
   const setHoveredTile = useGameStore((s) => s.setHoveredTile);
   const onTileClick = useGameStore((s) => s.onTileClick);
@@ -545,7 +612,39 @@ export const IslandBoard: React.FC = () => {
 
   const { camera, gl } = useThree();
   const powered = useMemo(() => isGridPowered(grid), [grid]);
-  const seaHexes = useMemo(() => generateSouthEastSeaHexes(), []);
+  const coast = useMemo(() => boardCoastFromSeed(boardSeed), [boardSeed]);
+  const seaHexes = coast.seaHexes;
+  const anchor = useMemo(() => boatAnchor(coast), [coast]);
+  const revealIndex = useMemo(() => {
+    const map = new Map<string, number>();
+    seaHexes.forEach((hex, index) => {
+      map.set(`sea-${hex.q},${hex.r}`, index);
+    });
+    const land = [...grid].sort((a, b) => {
+      if (a.coastalDepth !== b.coastalDepth) return a.coastalDepth - b.coastalDepth;
+      const [ax, az] = axialToWorld(a.q, a.r);
+      const [bx, bz] = axialToWorld(b.q, b.r);
+      return Math.atan2(az, ax) - Math.atan2(bz, bx);
+    });
+    land.forEach((tile, index) => {
+      map.set(`${tile.q},${tile.r}`, seaHexes.length + index);
+    });
+    return map;
+  }, [grid, seaHexes]);
+  const boatIndex = useMemo(() => {
+    let best = 0;
+    let bestDist = Infinity;
+    seaHexes.forEach((hex, index) => {
+      const dist = (hex.x - anchor.x) ** 2 + (hex.z - anchor.z) ** 2;
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = index;
+      }
+    });
+    return best;
+  }, [seaHexes, anchor]);
+  // Hold the rise while the forecast bulletin covers the match board.
+  const revealHold = screen === 'MATCH' && phase === 'FORECAST';
 
   const activeHand = phase === 'KALIKASAN_CARDS' ? kalikasanHand : defenderHand;
   const activeCardObj = activeHand.find((c) => c.uid === selectedHandCardUid);
@@ -637,23 +736,44 @@ export const IslandBoard: React.FC = () => {
       {/* Surrounding Ocean, Sea Stacks, Coastal Mist Clouds & Seagulls */}
       <ArchipelagoBackdrop signal5Active={vfx.signal5Active} windSeverity={windSeverity} />
 
-      {/* Swaying Coconut Palms on the Inland (North/West) Rim */}
-      <PalmTree position={[-3.55, 0.0, -0.35]} scale={0.95} windLevel={windSeverity} seed={1.1} />
-      <PalmTree position={[-1.8, 0.0, -3.1]} scale={1.05} windLevel={windSeverity} seed={2.4} />
-      <PalmTree position={[1.8, 0.0, -3.1]} scale={0.92} windLevel={windSeverity} seed={3.7} />
+      {/* Palms rise with the inland rim so they do not hang over empty water. */}
+      {[
+        { position: [-3.55, 0, -0.35] as [number, number, number], scale: 0.95, seed: 1.1 },
+        { position: [-1.8, 0, -3.1] as [number, number, number], scale: 1.05, seed: 2.4 },
+        { position: [1.8, 0, -3.1] as [number, number, number], scale: 0.92, seed: 3.7 }
+      ].map((palm, palmIndex) => (
+        <RevealedHex
+          key={`palm-${palm.seed}`}
+          revealKey={boardReveal}
+          index={seaHexes.length + grid.length - 3 + palmIndex}
+          hold={revealHold}
+          position={palm.position}
+        >
+          <PalmTree position={[0, 0, 0]} scale={palm.scale} windLevel={windSeverity} seed={palm.seed} />
+        </RevealedHex>
+      ))}
 
       {/* CONTIGUOUS HEXAGONAL SEA TILES ALONG THE TWO SOUTH-EAST EDGES (Ring 4 & Ring 5) */}
       {seaHexes.map((sh) => (
-        <OceanHexPrism
-          key={`sea-${sh.q},${sh.r}`}
-          seaHex={sh}
-          signal5Active={vfx.signal5Active}
-          windSeverity={windSeverity}
-        />
+        <RevealedHex
+          key={`sea-${sh.ring}-${sh.q},${sh.r}`}
+          revealKey={boardReveal}
+          index={revealIndex.get(`sea-${sh.q},${sh.r}`) ?? 0}
+          hold={revealHold}
+          position={[sh.x, 0, sh.z]}
+        >
+          <OceanHexPrism
+            seaHex={sh}
+            signal5Active={vfx.signal5Active}
+            windSeverity={windSeverity}
+          />
+        </RevealedHex>
       ))}
 
-      {/* Bobbing Philippine Bangka Outrigger Boat on the South-East Hex Sea */}
-      <BangkaBoat windLevel={windSeverity} />
+      {/* The bangka rises with the shallow surf hex it sits on. */}
+      <RevealedHex revealKey={boardReveal} index={boatIndex} hold={revealHold} position={[0, 0, 0]}>
+        <BangkaBoat windLevel={windSeverity} anchor={anchor} />
+      </RevealedHex>
 
       {/* 37 POINTY-TOP HEXAGONAL PRISM LAND TILES (Radius 3) */}
       {grid.map((tile) => {
@@ -661,22 +781,19 @@ export const IslandBoard: React.FC = () => {
         const highlighted = isTileHighlighted(tile.q, tile.r);
         const inRadius = isInsideRadiusPreview(tile.q, tile.r);
 
-        // Stepped elevation from the South-East sea edge (coastalDepth 0) to inland
-        const tileHeight =
-          tile.coastalDepth === 0 ? 0.16 : tile.coastalDepth === 1 ? 0.2 : 0.24;
+        const tileHeight = tilePrismHeight(tile.coastalDepth, tile.q, tile.r, boardSeed);
         const tileY = (tileHeight - 0.16) / 2;
+        const tint = mixHash(tile.q, tile.r, boardSeed);
 
-        // Vibrant top cap colors matching the reference screenshot
         let topCapColor =
           tile.coastalDepth === 0
-            ? '#fbbf24' // Golden yellow coastal sand
+            ? (['#fde68a', '#fbbf24', '#f59e0b'] as const)[tint % 3]
             : tile.coastalDepth === 1
-            ? '#a3e635' // Bright lime-green lowland
-            : (tile.q - tile.r) % 2 === 0
-            ? '#22c55e' // Rich emerald inland turf A
-            : '#4ade80'; // Vibrant leaf green inland turf B
+            ? tint % 2 === 0
+              ? '#a3e635'
+              : '#bef264'
+            : (['#22c55e', '#4ade80', '#16a34a'] as const)[tint % 3];
 
-        // Civic plaza stone at (0, 0) Barangay Hall
         if (tile.q === 0 && tile.r === 0) {
           topCapColor = '#cbd5e1';
         }
@@ -699,7 +816,13 @@ export const IslandBoard: React.FC = () => {
           selectedBuildType !== 'UPGRADE';
 
         return (
-          <group key={`${tile.q},${tile.r}`} position={[x, tileY, z]}>
+          <RevealedHex
+            key={`${tile.q},${tile.r}`}
+            revealKey={boardReveal}
+            index={revealIndex.get(`${tile.q},${tile.r}`) ?? seaHexes.length}
+            hold={revealHold}
+            position={[x, tileY, z]}
+          >
             {/* Deep Hexagonal Bedrock Column under each land hex */}
             <mesh position={[0, -tileHeight / 2 - 0.28, 0]}>
               <cylinderGeometry args={[0.635, 0.59, 0.56, 6]} />
@@ -745,6 +868,7 @@ export const IslandBoard: React.FC = () => {
                 r={tile.r}
                 coastalDepth={tile.coastalDepth}
                 tileHeight={tileHeight}
+                seed={boardSeed}
               />
             )}
 
@@ -790,7 +914,7 @@ export const IslandBoard: React.FC = () => {
                 <BuildingRenderer building={tile.building} isPowered={powered} />
               </group>
             )}
-          </group>
+          </RevealedHex>
         );
       })}
     </group>

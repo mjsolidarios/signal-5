@@ -125,13 +125,174 @@ export function worldToAxial(x: number, z: number): HexCoord {
 }
 
 /**
- * Computes hex distance from the two South-East sea edges:
- * Edge A: q + r = 3 (for q >= 0, r >= 0)
- * Edge B: r = 3 (for q <= 0)
- * Coastal sea edge tiles have coastalDepth === 0.
+ * Canonical distance from the two fixed South-East sea edges.
+ * Procedural boards store their own coastalDepth; this is the uncut shelf.
+ * Edge A: q + r = 3. Edge B: r = 3.
  */
 export function getCoastalDepth(q: number, r: number): number {
   return HEX_RADIUS - Math.max(q + r, r);
+}
+
+/** Deterministic 0..1 RNG. One instance per generation pass. */
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+export function rollBoardSeed(): number {
+  const seed = Math.floor(Math.random() * 0x7fffffff);
+  return seed === 0 ? 1 : seed;
+}
+
+export function mixHash(q: number, r: number, seed: number): number {
+  let h = (seed ^ Math.imul(q, 374761393) ^ Math.imul(r, 668265263)) >>> 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return (h ^ (h >>> 16)) >>> 0;
+}
+
+/**
+ * Prism height for a land hex. Sea edge and lowland stay on fixed steps so
+ * flood rows read clearly. Inland terraces grow an occasional knoll.
+ */
+export function tilePrismHeight(
+  coastalDepth: number,
+  q: number,
+  r: number,
+  seed: number
+): number {
+  const base = coastalDepth === 0 ? 0.16 : coastalDepth === 1 ? 0.2 : 0.24;
+  if (coastalDepth < 3) return base;
+  return mixHash(q, r, seed) % 5 === 0 ? 0.3 : base;
+}
+
+export interface SeaHexSpec {
+  q: number;
+  r: number;
+  ring: 4 | 5;
+  x: number;
+  z: number;
+  phase: number;
+}
+
+export interface BoardCoast {
+  seed: number;
+  sources: { q: number; r: number }[];
+  seaHexes: SeaHexSpec[];
+}
+
+/** Pointy-top hex ring, walked clockwise from the south-west corner. */
+function hexRing(radius: number): { q: number; r: number }[] {
+  const dirs: [number, number][] = [
+    [1, 0],
+    [1, -1],
+    [0, -1],
+    [-1, 0],
+    [-1, 1],
+    [0, 1]
+  ];
+  let q = dirs[4][0] * radius;
+  let r = dirs[4][1] * radius;
+  const arc: { q: number; r: number }[] = [];
+  for (let edge = 0; edge < 6; edge++) {
+    for (let step = 0; step < radius; step++) {
+      arc.push({ q, r });
+      q += dirs[edge][0];
+      r += dirs[edge][1];
+    }
+  }
+  return arc;
+}
+
+function depthFromSources(
+  q: number,
+  r: number,
+  sources: { q: number; r: number }[]
+): number {
+  let best = Infinity;
+  for (const source of sources) {
+    if (source.q === q && source.r === r) continue;
+    const dist = hexDistance(q, r, source.q, source.r);
+    if (dist < best) best = dist;
+  }
+  return best - 1;
+}
+
+/**
+ * Ordered south-east surf, from the south-west shoulder to the east corner.
+ * Index of the south corner (0, 4) is 1.
+ */
+function southEastSurf(): { q: number; r: number }[] {
+  const arc: { q: number; r: number }[] = [{ q: -4, r: 3 }];
+  for (let q = -4; q <= 0; q++) arc.push({ q, r: 4 });
+  for (let q = 1; q <= 4; q++) arc.push({ q, r: 4 - q });
+  return arc;
+}
+
+/**
+ * South-east coast for one match. A seeded window on the south-east shore
+ * lengthens or shortens the beach, and always keeps the south corner wet.
+ * Sources stay off the land, so the hall remains outside the 3-row surge.
+ * Depth is distance to that water, so a flood wall on a shortest path still
+ * shields the tiles behind it.
+ */
+export function boardCoastFromSeed(seed: number): BoardCoast {
+  const rng = mulberry32(seed >>> 0);
+  const arc = southEastSurf();
+  const corner = arc.findIndex((hex) => hex.q === 0 && hex.r === 4);
+  const length = 6 + Math.floor(rng() * 4);
+  const minStart = Math.max(0, corner - (length - 1));
+  const maxStart = Math.min(corner, arc.length - length);
+  const span = Math.max(1, maxStart - minStart + 1);
+  const start = minStart + Math.floor(rng() * span);
+  const sources = arc.slice(start, start + length);
+
+  const deepHexes = hexRing(5).filter(
+    (hex) =>
+      hex.r >= 0 &&
+      sources.some((source) => hexDistance(hex.q, hex.r, source.q, source.r) === 1)
+  );
+  deepHexes.sort((a, b) => {
+    const [ax, az] = axialToWorld(a.q, a.r);
+    const [bx, bz] = axialToWorld(b.q, b.r);
+    return Math.atan2(az, ax) - Math.atan2(bz, bx);
+  });
+
+  const seaHexes: SeaHexSpec[] = [];
+  for (const hex of [...sources, ...deepHexes]) {
+    const [x, z] = axialToWorld(hex.q, hex.r);
+    seaHexes.push({
+      q: hex.q,
+      r: hex.r,
+      ring: hexDistance(hex.q, hex.r, 0, 0) >= 5 ? 5 : 4,
+      x,
+      z,
+      phase: hex.q * 0.75 + hex.r * 1.15
+    });
+  }
+
+  return { seed, sources, seaHexes };
+}
+
+/** Place the bangka on the middle of this game's shallow surf, parallel to the shore. */
+export function boatAnchor(coast: BoardCoast): { x: number; z: number; yaw: number } {
+  const surf = coast.seaHexes.filter((hex) => hex.ring === 4);
+  const index = Math.floor(surf.length / 2);
+  const mid = surf[index] ?? coast.seaHexes[0];
+  const prev = surf[Math.max(0, index - 1)] ?? mid;
+  const next = surf[Math.min(surf.length - 1, index + 1)] ?? mid;
+  const dx = next.x - prev.x;
+  const dz = next.z - prev.z;
+  // Hull long axis is local +X. rotation.y sends local +X to (cos yaw, 0, -sin yaw).
+  const yaw = Math.atan2(-dz, dx);
+  // Sit just off the sand, inboard of the surf hex, so the hull clears the build bar.
+  const span = Math.hypot(mid.x, mid.z) || 1;
+  const pull = 0.9;
+  return { x: mid.x - (mid.x / span) * pull, z: mid.z - (mid.z / span) * pull, yaw };
 }
 
 export function isCoastalEdgeTile(q: number, r: number): boolean {
@@ -160,15 +321,18 @@ export function createBuildingInstance(
 }
 
 /**
- * Creates a fresh radius-3 hexagonal barangay board (37 tiles).
- * Barangay Hall is pre-placed at (0, 0), with two starter Nipa Huts nearby.
+ * Fresh radius-3 barangay (37 land tiles) for one match seed.
+ * Hall stays at the plaza, outside the 3-row surge. The two nipa huts land
+ * on a safe terrace that changes with the coastline. The same seed always
+ * rebuilds the same shore.
  */
-export function createInitialGrid(): TileState[] {
+export function createInitialGrid(seed: number): TileState[] {
+  const coast = boardCoastFromSeed(seed);
   const tiles: TileState[] = [];
   for (let r = -HEX_RADIUS; r <= HEX_RADIUS; r++) {
     for (let q = -HEX_RADIUS; q <= HEX_RADIUS; q++) {
       if (!isValidHex(q, r)) continue;
-      const coastalDepth = getCoastalDepth(q, r);
+      const coastalDepth = depthFromSources(q, r, coast.sources);
       tiles.push({
         q,
         r,
@@ -182,20 +346,35 @@ export function createInitialGrid(): TileState[] {
     }
   }
 
-  // Pre-place Barangay Hall at center (0, 0) with 2 barangay staff residents
   const center = getTile(tiles, 0, 0);
   if (center) {
     center.building = createBuildingInstance('BARANGAY_HALL', 2);
   }
 
-  // Pre-place two starter Nipa Huts (4 residents each)
-  const hut1 = getTile(tiles, -1, 1);
-  if (hut1) {
-    hut1.building = createBuildingInstance('HOUSING', 4);
+  const rng = mulberry32((seed ^ 0x85ebca6b) >>> 0);
+  const spots = tiles.filter(
+    (tile) =>
+      !(tile.q === 0 && tile.r === 0) &&
+      tile.coastalDepth >= 2 &&
+      hexDistance(tile.q, tile.r, 0, 0) <= 2
+  );
+  const safest = spots.reduce((min, tile) => Math.min(min, tile.coastalDepth), Infinity);
+  const band = spots.filter((tile) => tile.coastalDepth === safest);
+  for (let i = band.length - 1; i > 0; i--) {
+    const j = Math.floor(rng() * (i + 1));
+    const swap = band[i];
+    band[i] = band[j];
+    band[j] = swap;
   }
-  const hut2 = getTile(tiles, 1, 0);
-  if (hut2) {
-    hut2.building = createBuildingInstance('HOUSING', 4);
+  const chosen = band.slice(0, 2);
+  if (chosen.length < 2) {
+    for (const tile of spots) {
+      if (chosen.length >= 2) break;
+      if (!chosen.includes(tile)) chosen.push(tile);
+    }
+  }
+  for (const hut of chosen) {
+    hut.building = createBuildingInstance('HOUSING', 4);
   }
 
   return tiles;
