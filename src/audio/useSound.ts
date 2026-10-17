@@ -503,6 +503,71 @@ class SoundManager {
   // SOUND EFFECTS (SFX)
   // ============================================================================
 
+  /**
+   * Playful, tactile popping sound synthesized for each entering tile.
+   * Features a fast upward-pitch chirp with a clean transient attack,
+   * mapped across an ascending pentatonic arpeggio (D-Major / B-Minor)
+   * with micro-variation to create a lively, musical cascading ripple.
+   */
+  public playTilePop(index = 0, total = 52, isSea = false): void {
+    if (this.muted) return;
+    const ctx = this.getContext();
+    if (!ctx || ctx.state !== 'running') return;
+
+    const now = ctx.currentTime;
+    const norm = Math.max(0, Math.min(1, index / Math.max(1, total - 1)));
+
+    // Pentatonic scale degrees in D-Major / B-Minor pentatonic: [D, E, F#, A, B]
+    // Matches the game's Umaga sa Barangay theme.
+    // Progressively ascends across ~4.8 octaves from deep sea (A2/D3) to central plaza (D6).
+    const PENTATONIC = [0, 2, 4, 7, 9];
+    const totalSteps = 24;
+    const stepIdx = Math.floor(norm * totalSteps);
+    const octave = Math.floor(stepIdx / 5);
+    const semitone = PENTATONIC[stepIdx % 5];
+    const baseMidi = (isSea ? 45 : 50) + octave * 12 + semitone;
+    const jitter = 1 + (Math.random() - 0.5) * 0.04;
+    const targetFreq = midiToFreq(baseMidi) * jitter;
+
+    // 1. Resonant Bubble/Pop Body (sine oscillator with upward pitch chirp)
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.type = 'sine';
+
+    // Upward pitch bend (classic "pop / bloop" envelope)
+    const startFreq = targetFreq * (isSea ? 0.65 : 0.72);
+    const peakFreq = targetFreq * (isSea ? 1.38 : 1.48);
+    osc.frequency.setValueAtTime(startFreq, now);
+    osc.frequency.exponentialRampToValueAtTime(peakFreq, now + 0.022);
+    osc.frequency.exponentialRampToValueAtTime(targetFreq * 0.98, now + 0.055);
+
+    const bodyVol = isSea ? 0.08 : 0.095;
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(bodyVol, now + 0.003);
+    gain.gain.exponentialRampToValueAtTime(0.0008, now + (isSea ? 0.075 : 0.065));
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    osc.start(now);
+    osc.stop(now + 0.08);
+
+    // 2. Tactile transient click (crisp wood / bubble snap)
+    const click = ctx.createOscillator();
+    const clickGain = ctx.createGain();
+    click.type = isSea ? 'sine' : 'triangle';
+    click.frequency.setValueAtTime(targetFreq * (isSea ? 2.5 : 3.2), now);
+    click.frequency.exponentialRampToValueAtTime(targetFreq * 1.5, now + 0.016);
+
+    const clickVol = isSea ? 0.028 : 0.045;
+    clickGain.gain.setValueAtTime(clickVol, now);
+    clickGain.gain.exponentialRampToValueAtTime(0.0008, now + 0.02);
+
+    click.connect(clickGain);
+    clickGain.connect(ctx.destination);
+    click.start(now);
+    click.stop(now + 0.025);
+  }
+
   public playCard(): void {
     const ctx = this.getContext();
     if (!ctx) return;

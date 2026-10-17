@@ -549,12 +549,22 @@ export const TitleScreen = () => {
         </div>
 
         <div className="title-features">
-          <div className="title-chip">
+          <div
+            className="title-chip title-chip-clickable"
+            title="Click to replay the smooth tile entrance animation!"
+            onClick={() => {
+              soundFX.startMusicLoop();
+              useGameStore.setState((s) => ({ boardReveal: s.boardReveal + 1 }));
+            }}
+            role="button"
+            tabIndex={0}
+            style={{ cursor: 'pointer' }}
+          >
             <DioramaIcon />
             <span>
               37-Hex
               <br />
-              Isometric Diorama
+              Isometric Diorama ↺
             </span>
           </div>
           <div className="title-chip">

@@ -1,6 +1,7 @@
 import React, { useEffect, useLayoutEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import * as THREE from 'three';
+import { soundFX } from '../audio/useSound';
 import { BUILDINGS } from '../data/buildings';
 import { ALL_CARDS } from '../data/cards';
 import {
@@ -19,20 +20,47 @@ import { isGridPowered } from '../logic/rules';
 import { useGameStore } from '../store/useGameStore';
 import { BuildingRenderer, GhostBuildingPreview } from './Buildings';
 
-/** Ease-out back. The overshoot is about a tenth of the rise, then it settles. */
-function easeOutBack(t: number): number {
-  const c1 = 2.5;
-  const c3 = c1 + 1;
-  return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2);
+/**
+ * Damped harmonic spring rise:
+ * Launches smoothly from 0 at p=0, overshoots to ~1.12 at p≈0.42, and settles smoothly to 1.0.
+ */
+function springRise(p: number): number {
+  if (p >= 1) return 1;
+  const omega = 7.5;
+  const decay = 5.2;
+  return 1 - Math.exp(-decay * p) * Math.cos(omega * p);
 }
 
-const REVEAL_STAGGER = 0.014;
-const REVEAL_DURATION = 0.18;
-const REVEAL_DROP = 0.72;
+/**
+ * Squash & stretch scale curve for the hex pop-in:
+ * Launches stretched along Y, balloons outward into an overshoot squash as it reaches peak,
+ * and settles into [1, 1] at rest.
+ */
+function hexEntranceScale(p: number): [number, number] {
+  if (p >= 1) return [1, 1];
+  const base = 1 - Math.pow(1 - p, 3);
+  const wave = Math.sin(p * Math.PI * 2.2) * Math.exp(-4.2 * p);
+  const scaleXZ = Math.max(0.01, base * (1 - wave * 0.38));
+  const scaleY = Math.max(0.01, base * (1 + wave * 0.58));
+  return [scaleXZ, scaleY];
+}
 
-function useHexReveal(revealKey: number, index: number, hold: boolean) {
+const REVEAL_STAGGER = 0.028;
+const REVEAL_DURATION = 0.45;
+const REVEAL_DROP = 1.15;
+
+function useHexReveal(
+  revealKey: number,
+  index: number,
+  totalCount: number,
+  isSea: boolean,
+  hold: boolean,
+  playSound = true
+) {
   const ref = useRef<THREE.Group>(null);
   const ready = useRef(false);
+  const done = useRef(false);
+  const popped = useRef(false);
   const start = useRef(0);
   const reduce = useRef(false);
   const holdRef = useRef(hold);
@@ -43,54 +71,88 @@ function useHexReveal(revealKey: number, index: number, hold: boolean) {
       typeof window !== 'undefined' &&
       window.matchMedia('(prefers-reduced-motion: reduce)').matches;
     ready.current = false;
+    done.current = false;
+    popped.current = false;
     const group = ref.current;
     if (!group) return;
     if (reduce.current) {
+      done.current = true;
       group.visible = true;
-      group.position.y = 0;
-      group.scale.setScalar(1);
+      group.position.set(0, 0, 0);
+      group.scale.set(1, 1, 1);
+      group.rotation.set(0, 0, 0);
       return;
     }
     group.visible = false;
-    group.position.y = -REVEAL_DROP;
-    group.scale.setScalar(0.94);
+    group.position.set(0, -REVEAL_DROP, 0);
+    group.scale.set(0.01, 0.01, 0.01);
+    group.rotation.set(0, 0, 0);
   }, [revealKey]);
 
   useFrame(({ clock }) => {
     const group = ref.current;
     if (!group) return;
-    if (reduce.current) {
+    if (reduce.current || done.current) {
       group.visible = true;
-      group.position.y = 0;
-      group.scale.setScalar(1);
+      group.position.set(0, 0, 0);
+      group.scale.set(1, 1, 1);
+      group.rotation.set(0, 0, 0);
       return;
     }
-    // The forecast bulletin covers the board. Stay hidden until it closes,
-    // then rise, so the stagger plays on the open island.
-    if (holdRef.current) {
-      ready.current = false;
+
+    // The forecast bulletin covers the board. Wait until it closes to start the reveal.
+    if (!ready.current && holdRef.current) {
       group.visible = false;
-      group.position.y = -REVEAL_DROP;
-      group.scale.setScalar(0.94);
+      group.position.set(0, -REVEAL_DROP, 0);
+      group.scale.set(0.01, 0.01, 0.01);
       return;
     }
+
     if (!ready.current) {
       start.current = clock.elapsedTime;
       ready.current = true;
     }
+
     const elapsed = clock.elapsedTime - start.current - index * REVEAL_STAGGER;
     if (elapsed <= 0) {
       group.visible = false;
-      group.position.y = -REVEAL_DROP;
-      group.scale.setScalar(0.94);
+      group.position.set(0, -REVEAL_DROP, 0);
+      group.scale.set(0.01, 0.01, 0.01);
       return;
     }
+
+    // Tile is entering the screen!
     group.visible = true;
+    if (!popped.current) {
+      popped.current = true;
+      if (playSound && !reduce.current) {
+        soundFX.playTilePop(index, totalCount, isSea);
+      }
+    }
+
     const progress = Math.min(elapsed / REVEAL_DURATION, 1);
-    const eased = easeOutBack(progress);
-    group.position.y = (eased - 1) * REVEAL_DROP;
-    const settle = Math.min(1, progress * 1.35);
-    group.scale.setScalar(0.94 + 0.06 * settle);
+    if (progress >= 1) {
+      done.current = true;
+      group.position.set(0, 0, 0);
+      group.scale.set(1, 1, 1);
+      group.rotation.set(0, 0, 0);
+      return;
+    }
+
+    // 1. Vertical spring rise with juicy overshoot
+    const riseVal = springRise(progress);
+    group.position.y = (riseVal - 1) * REVEAL_DROP;
+
+    // 2. Playful squash & stretch
+    const [scaleXZ, scaleY] = hexEntranceScale(progress);
+    group.scale.set(scaleXZ, scaleY, scaleXZ);
+
+    // 3. Subtle tactile wobble/tilt as it lands
+    const wobble = Math.sin(progress * Math.PI) * Math.exp(-4.2 * progress);
+    const tiltX = Math.sin(index * 1.7) * 0.07;
+    const tiltZ = Math.cos(index * 2.3) * 0.07;
+    group.rotation.x = tiltX * wobble;
+    group.rotation.z = tiltZ * wobble;
   });
 
   return ref;
@@ -99,11 +161,23 @@ function useHexReveal(revealKey: number, index: number, hold: boolean) {
 const RevealedHex: React.FC<{
   revealKey: number;
   index: number;
+  totalCount?: number;
+  isSea?: boolean;
   hold: boolean;
+  playSound?: boolean;
   position: [number, number, number];
   children: React.ReactNode;
-}> = ({ revealKey, index, hold, position, children }) => {
-  const ref = useHexReveal(revealKey, index, hold);
+}> = ({
+  revealKey,
+  index,
+  totalCount = 52,
+  isSea = false,
+  hold,
+  playSound = true,
+  position,
+  children
+}) => {
+  const ref = useHexReveal(revealKey, index, totalCount, isSea, hold, playSound);
   return (
     <group position={position}>
       <group ref={ref}>{children}</group>
@@ -615,34 +689,48 @@ export const IslandBoard: React.FC = () => {
   const coast = useMemo(() => boardCoastFromSeed(boardSeed), [boardSeed]);
   const seaHexes = coast.seaHexes;
   const anchor = useMemo(() => boatAnchor(coast), [coast]);
+  const totalTiles = seaHexes.length + grid.length;
   const revealIndex = useMemo(() => {
     const map = new Map<string, number>();
-    seaHexes.forEach((hex, index) => {
+
+    // 1. Sea hexes: deep ocean (ring 5) enters first, followed by shallow surf (ring 4)
+    const sortedSea = [...seaHexes].sort((a, b) => {
+      if (a.ring !== b.ring) return b.ring - a.ring; // Ring 5 outer ocean first, then Ring 4 shallow surf
+      return Math.atan2(a.z, a.x) - Math.atan2(b.z, b.x);
+    });
+    sortedSea.forEach((hex, index) => {
       map.set(`sea-${hex.q},${hex.r}`, index);
     });
+
+    // 2. Land hexes: sorted by coastalDepth ascending (beach -> lowland -> inland)
+    // with snaking direction on alternating bands so the wave sweeps continuously back-and-forth
     const land = [...grid].sort((a, b) => {
       if (a.coastalDepth !== b.coastalDepth) return a.coastalDepth - b.coastalDepth;
       const [ax, az] = axialToWorld(a.q, a.r);
       const [bx, bz] = axialToWorld(b.q, b.r);
-      return Math.atan2(az, ax) - Math.atan2(bz, bx);
+      const angleA = Math.atan2(az, ax);
+      const angleB = Math.atan2(bz, bx);
+      return a.coastalDepth % 2 === 0 ? angleA - angleB : angleB - angleA;
     });
     land.forEach((tile, index) => {
-      map.set(`${tile.q},${tile.r}`, seaHexes.length + index);
+      map.set(`${tile.q},${tile.r}`, sortedSea.length + index);
     });
+
     return map;
   }, [grid, seaHexes]);
+
   const boatIndex = useMemo(() => {
     let best = 0;
     let bestDist = Infinity;
-    seaHexes.forEach((hex, index) => {
+    seaHexes.forEach((hex) => {
       const dist = (hex.x - anchor.x) ** 2 + (hex.z - anchor.z) ** 2;
       if (dist < bestDist) {
         bestDist = dist;
-        best = index;
+        best = revealIndex.get(`sea-${hex.q},${hex.r}`) ?? 0;
       }
     });
     return best;
-  }, [seaHexes, anchor]);
+  }, [seaHexes, anchor, revealIndex]);
   // Hold the rise while the forecast bulletin covers the match board.
   const revealHold = screen === 'MATCH' && phase === 'FORECAST';
 
@@ -746,7 +834,9 @@ export const IslandBoard: React.FC = () => {
           key={`palm-${palm.seed}`}
           revealKey={boardReveal}
           index={seaHexes.length + grid.length - 3 + palmIndex}
+          totalCount={totalTiles}
           hold={revealHold}
+          playSound={false}
           position={palm.position}
         >
           <PalmTree position={[0, 0, 0]} scale={palm.scale} windLevel={windSeverity} seed={palm.seed} />
@@ -759,7 +849,10 @@ export const IslandBoard: React.FC = () => {
           key={`sea-${sh.ring}-${sh.q},${sh.r}`}
           revealKey={boardReveal}
           index={revealIndex.get(`sea-${sh.q},${sh.r}`) ?? 0}
+          totalCount={totalTiles}
+          isSea={true}
           hold={revealHold}
+          playSound={true}
           position={[sh.x, 0, sh.z]}
         >
           <OceanHexPrism
@@ -771,7 +864,15 @@ export const IslandBoard: React.FC = () => {
       ))}
 
       {/* The bangka rises with the shallow surf hex it sits on. */}
-      <RevealedHex revealKey={boardReveal} index={boatIndex} hold={revealHold} position={[0, 0, 0]}>
+      <RevealedHex
+        revealKey={boardReveal}
+        index={boatIndex}
+        totalCount={totalTiles}
+        isSea={true}
+        hold={revealHold}
+        playSound={false}
+        position={[0, 0, 0]}
+      >
         <BangkaBoat windLevel={windSeverity} anchor={anchor} />
       </RevealedHex>
 
@@ -820,7 +921,10 @@ export const IslandBoard: React.FC = () => {
             key={`${tile.q},${tile.r}`}
             revealKey={boardReveal}
             index={revealIndex.get(`${tile.q},${tile.r}`) ?? seaHexes.length}
+            totalCount={totalTiles}
+            isSea={false}
             hold={revealHold}
+            playSound={true}
             position={[x, tileY, z]}
           >
             {/* Deep Hexagonal Bedrock Column under each land hex */}
